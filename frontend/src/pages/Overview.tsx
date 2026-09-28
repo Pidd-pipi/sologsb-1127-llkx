@@ -24,6 +24,7 @@ import type { RectifyPlan } from '../types/rectify';
 import StatusBadge from '../components/common/StatusBadge';
 import FacilityIcon from '../components/common/FacilityIcon';
 import EmptyState from '../components/common/EmptyState';
+import UnitCell from '../components/common/UnitCell';
 import { isOverdue, percent } from '../utils/format';
 
 interface GroupRow {
@@ -44,6 +45,7 @@ export default function Overview() {
     filteredInspections,
     pendingRectifies,
     latestByPoint,
+    pointMap,
     passRate,
   } = useInspectionFilter();
   const drill = useUiStore((s) => s.drill);
@@ -126,7 +128,14 @@ export default function Overview() {
       ),
     },
     { title: '整改要求', dataIndex: 'requirement', ellipsis: true },
-    { title: '责任单位', dataIndex: 'unit', width: 170 },
+    {
+      title: '责任单位',
+      dataIndex: 'unit',
+      width: 230,
+      render: (_: string, row) => (
+        <UnitCell plan={row} currentUnit={pointMap.get(row.pointId)?.maintainUnit} />
+      ),
+    },
     {
       title: '整改期限',
       dataIndex: 'deadline',

@@ -36,7 +36,7 @@ docker compose down
 | --- | --- | --- |
 | `/` | 核验总览：按行政区与设施类型汇总点位数、合格率、待整改数，点击统计块下钻清单 | AccessPoint / Inspection / RectifyPlan |
 | `/points/new` | 点位登记：地图打点或手填经纬度，可同时录入首次核验实测值 | AccessPoint / Inspection |
-| `/points/:id` | 点位详情：地图定位与属性、核验历史、就地新增核验、整改跟踪 | 四个模型 |
+| `/points/:id` | 点位详情：地图定位与属性、核验历史、就地新增核验、整改跟踪、责任单位移交登记 | 五个模型 |
 | `/routes` | 通行路线编制：选点自动串联路段，逐段填障碍数/台阶数/路缘高差，输出全线判定 | RouteSegment / AccessPoint |
 | `/map` | 设施地图：按设施类型着色渲染点位，点选弹出核验摘要 | AccessPoint / Inspection |
 | `/rectify` | 整改清单：按状态与期限分组、逾期置顶，登记复检结果 | RectifyPlan / AccessPoint |
@@ -45,17 +45,29 @@ docker compose down
 
 | 模型 | 文件 | 关键字段 |
 | --- | --- | --- |
-| AccessPoint | `src/types/point.ts` | 点位编号、名称、设施类型、经纬度、行政区、所在道路或建筑、建成年代、养护单位 |
+| AccessPoint | `src/types/point.ts` | 点位编号、名称、设施类型、经纬度、行政区、所在道路或建筑、建成年代、养护单位（当前责任单位，移交后更新） |
 | Inspection | `src/types/inspection.ts` | 核验日期、核验人、坡度 %、净宽 cm、扶手、盲道连续性、占用情况、结论、问题描述 |
 | RouteSegment | `src/types/route.ts` | 路线名称、起点/终点点位、长度、障碍数、台阶数、路缘高差、是否可轮椅通行 |
-| RectifyPlan | `src/types/rectify.ts` | 点位 id、整改要求、责任单位、整改期限、复检日期、状态 |
+| RectifyPlan | `src/types/rectify.ts` | 点位 id、整改要求、责任单位、整改期限、复检日期、状态、责任单位变更轨迹 `unitChanges` |
+| UnitTransfer | `src/types/transfer.ts` | 点位 id、移交前/后养护单位、移交日期、移交原因 |
+
+### 责任单位移交规则
+
+点位详情「责任单位调整」登记移交（新养护单位、移交日期、原因必填）：
+
+- 点位 `maintainUnit` 更新为新单位，并写入 `unitTransfers` 移交记录（同事务提交）；
+- 点位上状态为「待整改」「复发」的整改条目责任单位跟随到新单位，并在 `unitChanges` 追加一条变更轨迹；
+- 「已整改」完成条目保留原责任单位，不被改写；
+- 移交后核验新生成的整改条目、复检后重新落单的复发条目，一律按点位最新养护单位落单，不会因历史条目单位回退；
+- 点位详情展示移交时间线；整改清单/总览的责任单位列通过变更记录气泡可查每次变更前后单位与原因。
 
 ## 数据存储
 
 - **IndexedDB（Dexie，库名 `gbaccessmap-db`）**：业务数据。含版本号与升级迁移：
   - `v1` 建 `points` / `inspections` 表；
   - `v2` 增加 `routes` 表与 `pointId` 相关索引；
-  - `v3` 增加 `rectifies` 表，并为历史「不合格」核验补建整改条目。
+  - `v3` 增加 `rectifies` 表，并为历史「不合格」核验补建整改条目；
+  - `v4` 增加 `unitTransfers` 表（养护单位移交记录），历史数据无需回填，缺省即视为未移交。
 - **localStorage**：点位登记表单草稿（`gbaccessmap-draft:point-new`）与 UI 偏好（`gbaccessmap-ui`）。
 - 首次打开时自动写入一批示例数据，便于直接体验。
 - 容器无状态：不使用数据库服务、不挂载命名卷，清空浏览器存储即可重置数据。
@@ -80,10 +92,10 @@ sologsb-1127/
     ├── tsconfig*.json
     ├── public/favicon.svg
     └── src/
-        ├── types/{point,inspection,route,rectify}.ts
+        ├── types/{point,inspection,route,rectify,transfer}.ts
         ├── db/index.ts                     # Dexie 封装 + 版本迁移 + 示例数据
         ├── stores/{pointStore,routeStore,uiStore}.ts
-        ├── components/common/{MapPanel,StatusBadge,FacilityIcon,MeasureInput,EmptyState}.tsx
+        ├── components/common/{MapPanel,StatusBadge,FacilityIcon,MeasureInput,EmptyState,UnitCell}.tsx
         ├── hooks/{useAmapLoader,useInspectionFilter,useLocalDraft}.ts
         ├── pages/{Overview,PointNew,PointDetail,Routes,MapView,Rectify}.tsx
         ├── layouts/AppLayout.tsx

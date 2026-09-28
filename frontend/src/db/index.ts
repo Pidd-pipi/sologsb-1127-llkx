@@ -3,6 +3,7 @@ import type { AccessPoint } from '../types/point';
 import type { Inspection } from '../types/inspection';
 import type { RouteSegment } from '../types/route';
 import type { RectifyPlan } from '../types/rectify';
+import type { UnitTransfer } from '../types/transfer';
 import { addDays, makeId, todayStr, toPlain } from '../utils/format';
 import { judgeInspection } from '../utils/routeCheck';
 
@@ -13,12 +14,14 @@ export const DB_NAME = 'gbaccessmap-db';
  * v1 建 points / inspections
  * v2 加 routes 表与 pointId 索引
  * v3 加 rectifies 表，并为历史不合格核验补建整改条目
+ * v4 加 unitTransfers 表（养护单位移交记录）
  */
 class AccessMapDb extends Dexie {
   points!: Table<AccessPoint, string>;
   inspections!: Table<Inspection, string>;
   routes!: Table<RouteSegment, string>;
   rectifies!: Table<RectifyPlan, string>;
+  unitTransfers!: Table<UnitTransfer, string>;
 
   constructor() {
     super(DB_NAME);
@@ -72,6 +75,14 @@ class AccessMapDb extends Dexie {
           });
         }
       });
+    // v4：养护单位移交记录表；历史点位/整改条目无需回填，缺省即视为未移交
+    this.version(4).stores({
+      points: 'id, code, facilityType, district, name',
+      inspections: 'id, pointId, date, conclusion',
+      routes: 'id, routeName, fromPointId, toPointId, order',
+      rectifies: 'id, pointId, status, deadline',
+      unitTransfers: 'id, pointId, transferDate',
+    });
   }
 }
 
@@ -160,7 +171,8 @@ const SEED_POINTS: Omit<AccessPoint, 'createdAt' | 'updatedAt'>[] = [
     district: '丰台区',
     location: '莲花池东路北侧辅路人行道',
     builtYear: 2014,
-    maintainUnit: '市政道路养护一所',
+    // 示例：该点位已由市政道路养护一所移交至二所（见 SEED_UNIT_TRANSFERS）
+    maintainUnit: '市政道路养护二所',
   },
   {
     id: 'pt-1008',
@@ -349,10 +361,19 @@ function buildSeed() {
       id: 'rct-seed-1',
       pointId: 'pt-1007',
       requirement: '清退盲道上的商铺货架，重做坡道并加装扶手，复测净宽不低于 120cm',
-      unit: '市政道路养护一所',
+      // 移交后未整改条目责任单位跟随到新单位，变更轨迹保留在 unitChanges
+      unit: '市政道路养护二所',
       deadline: addDays(today, -21),
       recheckDate: '',
       status: '待整改',
+      unitChanges: [
+        {
+          fromUnit: '市政道路养护一所',
+          toUnit: '市政道路养护二所',
+          date: addDays(today, -14),
+          reason: '片区养护范围调整，莲花池东路辅道移交二所接管',
+        },
+      ],
       createdAt: now,
     },
     {
@@ -385,8 +406,30 @@ function buildSeed() {
       status: '已整改',
       createdAt: now,
     },
+    {
+      id: 'rct-seed-5',
+      pointId: 'pt-1007',
+      // 移交前完成的历史整改，责任单位保留原养护单位
+      requirement: '修复盲道砖松动、填补缺失提示盲道 3 处',
+      unit: '市政道路养护一所',
+      deadline: addDays(today, -70),
+      recheckDate: addDays(today, -52),
+      status: '已整改',
+      createdAt: now,
+    },
   ];
-  return { points, inspections, routes, rectifies };
+  const unitTransfers: UnitTransfer[] = [
+    {
+      id: 'trf-seed-1',
+      pointId: 'pt-1007',
+      fromUnit: '市政道路养护一所',
+      toUnit: '市政道路养护二所',
+      transferDate: addDays(today, -14),
+      reason: '片区养护范围调整，莲花池东路辅道移交二所接管',
+      createdAt: now,
+    },
+  ];
+  return { points, inspections, routes, rectifies, unitTransfers };
 }
 
 /** 首次打开时写入示例数据；已有数据则跳过 */
@@ -394,12 +437,21 @@ export async function ensureSeed(): Promise<void> {
   const count = await db.points.count();
   if (count > 0) return;
   const seed = toPlain(buildSeed());
-  await db.transaction('rw', db.points, db.inspections, db.routes, db.rectifies, async () => {
-    await db.points.bulkPut(seed.points);
-    await db.inspections.bulkPut(seed.inspections);
-    await db.routes.bulkPut(seed.routes);
-    await db.rectifies.bulkPut(seed.rectifies);
-  });
+  await db.transaction(
+    'rw',
+    db.points,
+    db.inspections,
+    db.routes,
+    db.rectifies,
+    db.unitTransfers,
+    async () => {
+      await db.points.bulkPut(seed.points);
+      await db.inspections.bulkPut(seed.inspections);
+      await db.routes.bulkPut(seed.routes);
+      await db.rectifies.bulkPut(seed.rectifies);
+      await db.unitTransfers.bulkPut(seed.unitTransfers);
+    },
+  );
 }
 
 export { makeId };

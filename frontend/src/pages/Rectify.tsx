@@ -20,6 +20,7 @@ import { Link } from 'react-router-dom';
 import dayjs from 'dayjs';
 import StatusBadge from '../components/common/StatusBadge';
 import EmptyState from '../components/common/EmptyState';
+import UnitCell from '../components/common/UnitCell';
 import { useInspectionFilter } from '../hooks/useInspectionFilter';
 import { usePointStore } from '../stores/pointStore';
 import { DISTRICTS, FACILITY_TYPES } from '../types/point';
@@ -36,6 +37,7 @@ export default function Rectify() {
   const { message } = App.useApp();
   const { filter, setFilter, resetFilter, pendingRectifies, pointMap } = useInspectionFilter();
   const rectifies = usePointStore((s) => s.rectifies);
+  const unitTransfers = usePointStore((s) => s.unitTransfers);
   const updateRectify = usePointStore((s) => s.updateRectify);
   const [statusFilter, setStatusFilter] = useState<RectifyStatus | ''>('');
   const [editing, setEditing] = useState<RectifyPlan | null>(null);
@@ -51,6 +53,18 @@ export default function Rectify() {
     () => (statusFilter ? scoped.filter((r) => r.status === statusFilter) : scoped),
     [scoped, statusFilter],
   );
+
+  /** 每个点位最近一次移交记录（不晚于今天），用于复检重新落单时按最新养护单位修正 */
+  const latestTransferByPoint = useMemo(() => {
+    const today = todayStr();
+    const map = new Map<string, (typeof unitTransfers)[number]>();
+    for (const t of unitTransfers) {
+      if (t.transferDate > today) continue;
+      const cur = map.get(t.pointId);
+      if (!cur || cur.transferDate < t.transferDate) map.set(t.pointId, t);
+    }
+    return map;
+  }, [unitTransfers]);
 
   const groups = useMemo(() => {
     const overdue = visible
@@ -83,11 +97,38 @@ export default function Rectify() {
       const requirement = draft.note.trim()
         ? `${editing.requirement}｜复检说明：${draft.note.trim()}`
         : editing.requirement;
-      await updateRectify(editing.id, {
+      const patch: Partial<RectifyPlan> = {
         status: draft.status,
         recheckDate: draft.recheckDate || todayStr(),
         requirement,
-      });
+      };
+      // 复检后仍需继续跟踪（复发/待整改）：责任单位按点位最新养护单位落单，
+      // 不能因为条目历史责任单位把单位改回去；已整改条目保留落单时单位。
+      if (draft.status !== '已整改') {
+        const point = pointMap.get(editing.pointId);
+        const latestUnit = point?.maintainUnit ?? editing.unit;
+        if (latestUnit !== editing.unit) {
+          const transfer = latestTransferByPoint.get(editing.pointId);
+          patch.unit = latestUnit;
+          patch.unitChanges = [
+            ...(editing.unitChanges ?? []),
+            transfer && transfer.toUnit === latestUnit
+              ? {
+                  fromUnit: editing.unit,
+                  toUnit: latestUnit,
+                  date: transfer.transferDate,
+                  reason: transfer.reason,
+                }
+              : {
+                  fromUnit: editing.unit,
+                  toUnit: latestUnit,
+                  date: draft.recheckDate || todayStr(),
+                  reason: '复检重新落单，按点位最新养护单位修正责任单位',
+                },
+          ];
+        }
+      }
+      await updateRectify(editing.id, patch);
       message.success('复检结果已登记');
       setEditing(null);
     } catch (e) {
@@ -112,7 +153,14 @@ export default function Rectify() {
       render: (_, row) => pointMap.get(row.pointId)?.district ?? '—',
     },
     { title: '整改要求', dataIndex: 'requirement', ellipsis: true },
-    { title: '责任单位', dataIndex: 'unit', width: 170 },
+    {
+      title: '责任单位',
+      dataIndex: 'unit',
+      width: 230,
+      render: (_: string, row) => (
+        <UnitCell plan={row} currentUnit={pointMap.get(row.pointId)?.maintainUnit} />
+      ),
+    },
     {
       title: '整改期限',
       dataIndex: 'deadline',
