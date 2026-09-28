@@ -4,10 +4,12 @@ import {
   Button,
   Card,
   Col,
+  DatePicker,
   Descriptions,
   Divider,
   Form,
   Input,
+  Modal,
   Row,
   Select,
   Space,
@@ -15,17 +17,21 @@ import {
   Switch,
   Table,
   Tag,
+  Timeline,
+  Tooltip,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { PlusOutlined, SaveOutlined, ReloadOutlined } from '@ant-design/icons';
+import { PlusOutlined, SaveOutlined, ReloadOutlined, SwapOutlined, HistoryOutlined } from '@ant-design/icons';
 import { Link, useParams } from 'react-router-dom';
+import dayjs from 'dayjs';
 import MapPanel from '../components/common/MapPanel';
 import MeasureInput from '../components/common/MeasureInput';
 import StatusBadge from '../components/common/StatusBadge';
 import FacilityIcon from '../components/common/FacilityIcon';
 import EmptyState from '../components/common/EmptyState';
 import { usePointStore } from '../stores/pointStore';
+import { MAINTAIN_UNITS } from '../types/point';
 import { OCCUPIED_LEVELS, type Inspection, type OccupiedLevel } from '../types/inspection';
 import type { RectifyPlan } from '../types/rectify';
 import { judgeInspection } from '../utils/routeCheck';
@@ -40,6 +46,21 @@ interface InlineInspection {
   tactileContinuous: boolean;
   occupied: OccupiedLevel;
   problem: string;
+}
+
+interface TransferForm {
+  toUnit: string;
+  date: string;
+  reason: string;
+}
+
+/** 移交记录的悬浮说明：从点位移交轨迹拼出责任变迁 */
+function transferTooltip(history: { date: string; fromUnit: string; toUnit: string }[]): string {
+  const lines = history
+    .slice()
+    .reverse()
+    .map((t) => `${t.date} ${t.fromUnit} → ${t.toUnit}`);
+  return `责任移交轨迹（共 ${history.length} 次）：\n${lines.join('\n')}`;
 }
 
 export default function PointDetail() {
@@ -65,6 +86,15 @@ export default function PointDetail() {
       rectifies.filter((r) => r.pointId === id).sort((a, b) => (a.deadline < b.deadline ? -1 : 1)),
     [rectifies, id],
   );
+  const transfers = usePointStore((s) => s.transfers);
+  const transferUnit = usePointStore((s) => s.transferUnit);
+  const transferHistory = useMemo(
+    () =>
+      transfers
+        .filter((t) => t.pointId === id)
+        .sort((a, b) => (a.date < b.date ? 1 : -1)),
+    [transfers, id],
+  );
 
   const [form, setForm] = useState<InlineInspection>(() => ({
     date: todayStr(),
@@ -77,6 +107,60 @@ export default function PointDetail() {
     problem: '',
   }));
   const [saving, setSaving] = useState(false);
+
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferForm, setTransferForm] = useState<TransferForm>({
+    toUnit: '',
+    date: todayStr(),
+    reason: '',
+  });
+  const [transferSaving, setTransferSaving] = useState(false);
+
+  const openTransfer = () => {
+    if (!point) return;
+    setTransferForm({
+      toUnit: MAINTAIN_UNITS.find((u) => u !== point.maintainUnit) ?? MAINTAIN_UNITS[0],
+      date: todayStr(),
+      reason: '',
+    });
+    setTransferOpen(true);
+  };
+
+  const handleTransfer = async () => {
+    if (!point) return;
+    if (!transferForm.toUnit) {
+      message.warning('请选择新责任单位');
+      return;
+    }
+    if (transferForm.toUnit === point.maintainUnit) {
+      message.warning('新责任单位与当前养护单位相同，无需调整');
+      return;
+    }
+    if (!transferForm.date) {
+      message.warning('请选择移交日期');
+      return;
+    }
+    if (!transferForm.reason.trim()) {
+      message.warning('请填写移交原因');
+      return;
+    }
+    setTransferSaving(true);
+    try {
+      await transferUnit({
+        pointId: point.id,
+        fromUnit: point.maintainUnit,
+        toUnit: transferForm.toUnit,
+        date: transferForm.date,
+        reason: transferForm.reason,
+      });
+      message.success(`责任单位已调整为 ${transferForm.toUnit}，未整改与复发条目已同步跟进`);
+      setTransferOpen(false);
+    } catch (e) {
+      message.error(`责任单位调整失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setTransferSaving(false);
+    }
+  };
 
   const judgement = useMemo(
     () =>
@@ -184,7 +268,33 @@ export default function PointDetail() {
 
   const rectifyColumns: ColumnsType<RectifyPlan> = [
     { title: '整改要求', dataIndex: 'requirement', ellipsis: true },
-    { title: '责任单位', dataIndex: 'unit', width: 170 },
+    {
+      title: '责任单位',
+      dataIndex: 'unit',
+      width: 200,
+      render: (unit: string, row) => {
+        const isOldUnit = unit !== point.maintainUnit;
+        return (
+          <Space size={4} wrap>
+            <span data-testid={`rectify-unit-${row.id}`}>{unit}</span>
+            {isOldUnit && (
+              <Tooltip title={`该条目责任单位为原养护单位；点位已于 ${transferHistory[transferHistory.length - 1]?.date} 移交至 ${point.maintainUnit}，已完成条目保留原责任单位`}>
+                <Tag color="default">原单位</Tag>
+              </Tooltip>
+            )}
+            {transferHistory.length > 0 && !isOldUnit && (
+              <Tooltip
+                title={
+                  <span style={{ whiteSpace: 'pre-line' }}>{transferTooltip(transferHistory)}</span>
+                }
+              >
+                <Tag color="blue">已移交</Tag>
+              </Tooltip>
+            )}
+          </Space>
+        );
+      },
+    },
     {
       title: '整改期限',
       dataIndex: 'deadline',
@@ -256,12 +366,84 @@ export default function PointDetail() {
               <Descriptions.Item label="行政区">{point.district}</Descriptions.Item>
               <Descriptions.Item label="所在道路或建筑">{point.location || '—'}</Descriptions.Item>
               <Descriptions.Item label="建成年代">{point.builtYear} 年</Descriptions.Item>
-              <Descriptions.Item label="养护单位">{point.maintainUnit}</Descriptions.Item>
+              <Descriptions.Item label="养护单位">
+                <Space size={6} wrap>
+                  <span data-testid="point-maintain-unit">{point.maintainUnit}</span>
+                  {transferHistory.length > 0 && (
+                    <Tooltip
+                      title={
+                        <span style={{ whiteSpace: 'pre-line' }}>
+                          {transferTooltip(transferHistory)}
+                        </span>
+                      }
+                    >
+                      <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                        已移交 {transferHistory.length} 次
+                      </Tag>
+                    </Tooltip>
+                  )}
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<SwapOutlined />}
+                    onClick={openTransfer}
+                    data-testid="adjust-unit"
+                    style={{ padding: 0, height: 'auto' }}
+                  >
+                    责任单位调整
+                  </Button>
+                </Space>
+              </Descriptions.Item>
               <Descriptions.Item label="经纬度">
                 {point.lng.toFixed(6)}, {point.lat.toFixed(6)}
               </Descriptions.Item>
               <Descriptions.Item label="核验次数">{history.length} 次</Descriptions.Item>
             </Descriptions>
+          </Card>
+
+          <Card
+            size="small"
+            style={{ marginTop: 16 }}
+            title={
+              <Space size={6}>
+                <HistoryOutlined />
+                <span>责任移交记录</span>
+              </Space>
+            }
+            extra={
+              <Button size="small" type="primary" ghost icon={<SwapOutlined />} onClick={openTransfer} data-testid="adjust-unit-card">
+                调整
+              </Button>
+            }
+          >
+            {transferHistory.length ? (
+              <Timeline
+                items={[...transferHistory].reverse().map((t) => ({
+                  color: 'blue',
+                  children: (
+                    <div data-testid={`transfer-item-${t.id}`}>
+                      <Space size={6} wrap>
+                        <Typography.Text strong>{t.date}</Typography.Text>
+                        <Typography.Text delete type="secondary">
+                          {t.fromUnit}
+                        </Typography.Text>
+                        <Typography.Text type="secondary">→</Typography.Text>
+                        <Typography.Text strong>{t.toUnit}</Typography.Text>
+                      </Space>
+                      <div>
+                        <Typography.Text type="secondary" className="gb-muted">
+                          移交原因：{t.reason}
+                        </Typography.Text>
+                      </div>
+                    </div>
+                  ),
+                }))}
+              />
+            ) : (
+              <Typography.Text type="secondary">
+                暂无移交记录，责任单位自登记以来未变更。
+              </Typography.Text>
+            )}
           </Card>
         </Col>
       </Row>
@@ -422,6 +604,75 @@ export default function PointDetail() {
           />
         )}
       </Card>
+
+      <Modal
+        title="责任单位调整"
+        open={transferOpen}
+        onCancel={() => setTransferOpen(false)}
+        onOk={handleTransfer}
+        confirmLoading={transferSaving}
+        okText="确认移交"
+        cancelText="取消"
+        destroyOnClose
+        data-testid="transfer-modal"
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Typography.Text type="secondary">
+            点位：{point.name}（{point.code}）
+            <br />
+            当前责任单位：{point.maintainUnit}
+          </Typography.Text>
+          <div>
+            <Typography.Text>
+              新责任单位 <span style={{ color: '#cf1322' }}>*</span>
+            </Typography.Text>
+            <Select
+              style={{ width: '100%', marginTop: 4 }}
+              value={transferForm.toUnit || undefined}
+              onChange={(v) => setTransferForm((c) => ({ ...c, toUnit: v }))}
+              options={MAINTAIN_UNITS.filter((u) => u !== point.maintainUnit).map((u) => ({
+                value: u,
+                label: u,
+              }))}
+              placeholder="选择接手的养护单位"
+              data-testid="transfer-unit-select"
+            />
+          </div>
+          <div>
+            <Typography.Text>
+              移交日期 <span style={{ color: '#cf1322' }}>*</span>
+            </Typography.Text>
+            <div style={{ marginTop: 4 }}>
+              <DatePicker
+                style={{ width: '100%' }}
+                value={transferForm.date ? dayjs(transferForm.date) : null}
+                onChange={(d) =>
+                  setTransferForm((c) => ({ ...c, date: d ? d.format('YYYY-MM-DD') : '' }))
+                }
+                allowClear={false}
+                data-testid="transfer-date"
+              />
+            </div>
+          </div>
+          <div>
+            <Typography.Text>
+              移交原因 <span style={{ color: '#cf1322' }}>*</span>
+            </Typography.Text>
+            <Input.TextArea
+              rows={3}
+              style={{ marginTop: 4 }}
+              value={transferForm.reason}
+              onChange={(e) => setTransferForm((c) => ({ ...c, reason: e.target.value }))}
+              placeholder="如：按片区养护边界调整，该路段设施统一划归新单位接管"
+              data-testid="transfer-reason"
+            />
+          </div>
+          <Typography.Text type="secondary" className="gb-muted">
+            保存后：点位养护单位更新为新单位；本点位「待整改 / 复发」条目的责任单位同步跟进，
+            后续逾期统计计入新单位；已完成条目保留原责任单位；变更前后均可在点位与整改清单追溯。
+          </Typography.Text>
+        </Space>
+      </Modal>
     </div>
   );
 }

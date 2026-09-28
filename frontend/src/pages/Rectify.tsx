@@ -12,6 +12,7 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -22,7 +23,7 @@ import StatusBadge from '../components/common/StatusBadge';
 import EmptyState from '../components/common/EmptyState';
 import { useInspectionFilter } from '../hooks/useInspectionFilter';
 import { usePointStore } from '../stores/pointStore';
-import { DISTRICTS, FACILITY_TYPES } from '../types/point';
+import { DISTRICTS, FACILITY_TYPES, MAINTAIN_UNITS } from '../types/point';
 import { RECTIFY_STATUSES, type RectifyPlan, type RectifyStatus } from '../types/rectify';
 import { isOverdue, todayStr } from '../utils/format';
 
@@ -36,11 +37,27 @@ export default function Rectify() {
   const { message } = App.useApp();
   const { filter, setFilter, resetFilter, pendingRectifies, pointMap } = useInspectionFilter();
   const rectifies = usePointStore((s) => s.rectifies);
+  const transfers = usePointStore((s) => s.transfers);
   const updateRectify = usePointStore((s) => s.updateRectify);
   const [statusFilter, setStatusFilter] = useState<RectifyStatus | ''>('');
+  const [unitFilter, setUnitFilter] = useState<string>('');
   const [editing, setEditing] = useState<RectifyPlan | null>(null);
   const [draft, setDraft] = useState<RecheckDraft>({ status: '已整改', recheckDate: todayStr(), note: '' });
   const [saving, setSaving] = useState(false);
+
+  /** 点位维度的移交轨迹（最新在前），供清单标注与悬浮查看 */
+  const transfersByPoint = useMemo(() => {
+    const map = new Map<string, { date: string; fromUnit: string; toUnit: string; reason: string }[]>();
+    for (const t of transfers) {
+      const list = map.get(t.pointId) ?? [];
+      list.push(t);
+      map.set(t.pointId, list);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => (a.date < b.date ? 1 : -1));
+    }
+    return map;
+  }, [transfers]);
 
   const scoped = useMemo(
     () => rectifies.filter((r) => pointMap.has(r.pointId)),
@@ -48,8 +65,18 @@ export default function Rectify() {
   );
 
   const visible = useMemo(
-    () => (statusFilter ? scoped.filter((r) => r.status === statusFilter) : scoped),
-    [scoped, statusFilter],
+    () =>
+      scoped.filter((r) => {
+        if (statusFilter && r.status !== statusFilter) return false;
+        // 可按「条目当前责任单位」或「点位当前养护单位」查：接手人能看到跟来的条目，
+        // 原单位也能查到已完成条目里保留的旧责任
+        if (unitFilter) {
+          const currentUnit = pointMap.get(r.pointId)?.maintainUnit;
+          if (r.unit !== unitFilter && currentUnit !== unitFilter) return false;
+        }
+        return true;
+      }),
+    [scoped, statusFilter, unitFilter, pointMap],
   );
 
   const groups = useMemo(() => {
@@ -112,7 +139,38 @@ export default function Rectify() {
       render: (_, row) => pointMap.get(row.pointId)?.district ?? '—',
     },
     { title: '整改要求', dataIndex: 'requirement', ellipsis: true },
-    { title: '责任单位', dataIndex: 'unit', width: 170 },
+    {
+      title: '责任单位',
+      dataIndex: 'unit',
+      width: 200,
+      render: (unit: string, row) => {
+        const point = pointMap.get(row.pointId);
+        const currentUnit = point?.maintainUnit;
+        const history = transfersByPoint.get(row.pointId) ?? [];
+        const isOldUnit = Boolean(currentUnit && unit !== currentUnit);
+        const tooltipText = history.length
+          ? `责任移交轨迹（共 ${history.length} 次）：\n${history
+              .map((t) => `${t.date} ${t.fromUnit} → ${t.toUnit}`)
+              .join('\n')}${isOldUnit ? '\n该条目保留移交前的原责任单位' : ''}`
+          : '';
+        return (
+          <Space size={4} wrap data-testid={`rectify-list-unit-${row.id}`}>
+            <span>{unit}</span>
+            {isOldUnit ? (
+              <Tooltip title={<span style={{ whiteSpace: 'pre-line' }}>{tooltipText}</span>}>
+                <Tag color="default">原单位</Tag>
+              </Tooltip>
+            ) : (
+              history.length > 0 && (
+                <Tooltip title={<span style={{ whiteSpace: 'pre-line' }}>{tooltipText}</span>}>
+                  <Tag color="blue">已移交</Tag>
+                </Tooltip>
+              )
+            )}
+          </Space>
+        );
+      },
+    },
     {
       title: '整改期限',
       dataIndex: 'deadline',
@@ -185,11 +243,24 @@ export default function Rectify() {
             onChange={(v) => setStatusFilter((v as RectifyStatus) ?? '')}
             options={RECTIFY_STATUSES.map((s) => ({ value: s, label: s }))}
           />
+          <Select
+            placeholder="责任单位"
+            style={{ width: 180 }}
+            allowClear
+            showSearch
+            value={unitFilter || undefined}
+            onChange={(v) => setUnitFilter(v ?? '')}
+            options={[
+              ...MAINTAIN_UNITS.map((u) => ({ value: u, label: u })),
+              { value: '待指派责任单位', label: '待指派责任单位' },
+            ]}
+          />
           <Button
             icon={<ReloadOutlined />}
             onClick={() => {
               resetFilter();
               setStatusFilter('');
+              setUnitFilter('');
             }}
           >
             重置
@@ -261,7 +332,7 @@ export default function Rectify() {
           title="没有匹配的整改条目"
           description="调整行政区、设施类型或状态筛选后再试"
           extra={
-            <Button onClick={() => { resetFilter(); setStatusFilter(''); }}>
+            <Button onClick={() => { resetFilter(); setStatusFilter(''); setUnitFilter(''); }}>
               <CheckOutlined /> 清空筛选
             </Button>
           }

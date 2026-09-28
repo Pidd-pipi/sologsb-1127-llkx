@@ -44,9 +44,27 @@ export interface AccessPoint {
   location: string;
   /** 建成年代 */
   builtYear: number;
+  /** 当前养护单位（随最近一次移交更新） */
   maintainUnit: string;
   createdAt: string;
   updatedAt: string;
 }
 
 export type AccessPointDraft = Omit<AccessPoint, 'id' | 'createdAt' | 'updatedAt'>;
+
+/** 责任单位移交记录：点位养护单位变更的审计轨迹 */
+export interface UnitTransfer {
+  id: string;
+  pointId: string;
+  /** 移交前责任单位（首次登记单位或上一任养护单位） */
+  fromUnit: string;
+  /** 移交后责任单位（点位当前养护单位） */
+  toUnit: string;
+  /** 移交日期 YYYY-MM-DD */
+  date: string;
+  /** 移交原因 */
+  reason: string;
+  createdAt: string;
+}
+
+export type UnitTransferDraft = Pick<UnitTransfer, 'pointId' | 'fromUnit' | 'toUnit' | 'date' | 'reason'>;
